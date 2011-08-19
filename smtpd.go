@@ -48,6 +48,15 @@ type Envelope interface {
 	AddRecipient(rcpt MailAddress) os.Error
 }
 
+type BasicEnvelope struct {
+	rcpts []MailAddress
+}
+
+func (e *BasicEnvelope) AddRecipient(rcpt MailAddress) os.Error {
+	e.rcpts = append(e.rcpts, rcpt)
+	return nil
+}
+
 // ArrivingMessage is the interface that must be implement by servers
 // receiving mail.
 type ArrivingMessage interface {
@@ -119,8 +128,8 @@ type session struct {
 	helloHost string
 }
 
-func (srv *Server) newSession(rwc net.Conn) (c *session, err os.Error) {
-	c = &session{
+func (srv *Server) newSession(rwc net.Conn) (s *session, err os.Error) {
+	s = &session{
 		srv: srv,
 		rwc: rwc,
 		br:  bufio.NewReader(rwc),
@@ -129,79 +138,77 @@ func (srv *Server) newSession(rwc net.Conn) (c *session, err os.Error) {
 	return
 }
 
-func (c *session) errorf(format string, args ...interface{}) {
+func (s *session) errorf(format string, args ...interface{}) {
 	log.Printf("Client error: "+format, args...)
 }
 
-func (c *session) sendf(format string, args ...interface{}) {
-	fmt.Fprintf(c.bw, format, args...)
-	c.bw.Flush()
+func (s *session) sendf(format string, args ...interface{}) {
+	fmt.Fprintf(s.bw, format, args...)
+	s.bw.Flush()
 }
 
-func (c *session) sendlinef(format string, args ...interface{}) {
-	c.sendf(format+"\r\n", args...)
+func (s *session) sendlinef(format string, args ...interface{}) {
+	s.sendf(format+"\r\n", args...)
 }
 
-func (c *session) Addr() net.Addr {
-	return c.rwc.RemoteAddr()
+func (s *session) Addr() net.Addr {
+	return s.rwc.RemoteAddr()
 }
 
-func (c *session) serve() {
-	defer c.rwc.Close()
-	if onc := c.srv.OnNewConnection; onc != nil {
-		if err := onc(c); err != nil {
+func (s *session) serve() {
+	defer s.rwc.Close()
+	if onc := s.srv.OnNewConnection; onc != nil {
+		if err := onc(s); err != nil {
 			// TODO: if the error implements a SMTPErrorStringer,
 			// call it and send the error back
+			//
+			// TODO: if the user error is 554 (rejecting this connection),
+			// we should relay that back too, and stick around for
+			// a bit (see RFC 5321 3.1)
 			return
 		}
 	}
-	c.sendf("220 %s ESMTP gosmtpd (Gosmtpd)\r\n", c.srv.hostname())
+	s.sendf("220 %s ESMTP gosmtpd\r\n", s.srv.hostname())
 	for {
-		sl, err := c.br.ReadSlice('\n')
+		sl, err := s.br.ReadSlice('\n')
 		if err != nil {
-			c.errorf("read error: %v", err)
+			s.errorf("read error: %v", err)
 			return
 		}
-		line := cmdLine{line: string(sl)}
+		line := cmdLine(string(sl))
 		if !line.valid() {
-			c.sendlinef("500 ??? invalid line received, not ending in \\r\\n")
+			s.sendlinef("500 ??? invalid line received, not ending in \\r\\n")
 			return
 		}
 		log.Printf("Client: %q, verb: %q", line, line.Verb())
 		switch line.Verb() {
 		case "HELO", "EHLO":
-			c.handleHello(line.Verb(), line.Arg())
+			s.handleHello(line.Verb(), line.Arg())
 		case "QUIT":
-			c.sendlinef("221 2.0.0 Bye")
+			s.sendlinef("221 2.0.0 Bye")
 			return
 		case "MAIL":
 			arg := line.Arg() // "From:<foo@bar.com>"
 			m := mailFromRE.FindStringSubmatch(arg)
 			if m == nil {
-				c.sendlinef("501 5.1.7 Bad sender address syntax")
+				s.sendlinef("501 5.1.7 Bad sender address syntax")
 				continue
 			}
-			c.handleMailFrom(m[1])
+			s.handleMailFrom(m[1])
 		case "RCPT":
-			arg := line.Arg() // "To:<foo@bar.com>"
-			m := rcptToRE.FindStringSubmatch(arg)
-			if m == nil {
-				c.sendlinef("501 5.1.7 Bad sender address syntax")
-				continue
-			}
-			c.handleRcptTo(m[1])
+			s.handleRcpt(line)
 		case "DATA":
-			c.sendlinef("354 Go ahead")
+			s.sendlinef("354 Go ahead")
 		default:
-			c.sendlinef("502 5.5.2 Error: command not recognized")
+			s.sendlinef("502 5.5.2 Error: command not recognized")
 		}
 	}
 }
 
-func (c *session) handleHello(greeting, host string) {
-	c.helloType = greeting
-	c.helloHost = host
-	fmt.Fprintf(c.bw, "250-%s\r\n", c.srv.hostname())
+func (s *session) handleHello(greeting, host string) {
+	s.helloType = greeting
+	s.helloHost = host
+	fmt.Fprintf(s.bw, "250-%s\r\n", s.srv.hostname())
 	for _, ext := range []string{
 		"250-PIPELINING",
 		"250-SIZE 10240000",
@@ -209,33 +216,46 @@ func (c *session) handleHello(greeting, host string) {
 		"250-8BITMIME",
 		"250 DSN",
 	} {
-		fmt.Fprintf(c.bw, "%s\r\n", ext)
+		fmt.Fprintf(s.bw, "%s\r\n", ext)
 	}
-	c.bw.Flush()
+	s.bw.Flush()
 }
 
-func (c *session) handleMailFrom(email string) {
+func (s *session) handleMailFrom(email string) {
 	log.Printf("mail from: %q", email)
-	cb := c.srv.OnNewMail
+	cb := s.srv.OnNewMail
 	if cb == nil {
 		log.Printf("smtp: Server.OnNewMail is nil; rejecting MAIL FROM")
-		c.sendf("451 Server.OnNewMail not configured\r\n")
+		s.sendf("451 Server.OnNewMail not configured\r\n")
 		return
 	}
-	c.env = nil
-	env, err := cb(c, addrString(email))
+	s.env = nil
+	env, err := cb(s, addrString(email))
 	if err != nil {
 		log.Printf("rejecting MAIL FROM %q: %v", email, err)
 		// TODO: send it back to client if warranted, like above
 		return
 	}
-	c.env = env
-	c.sendlinef("250 2.1.0 Ok")
+	s.env = env
+	s.sendlinef("250 2.1.0 Ok")
 }
 
-func (c *session) handleRcptTo(email string) {
-	log.Printf("rcpt to: %q", email)
-	c.sendf("250 2.1.0 Ok\r\n")
+func (s *session) handleRcpt(line cmdLine) {
+	if s.env == nil {
+		s.sendlinef("503 5.5.1 Error: need MAIL command")
+		return
+	}
+	arg := line.Arg() // "To:<foo@bar.com>"
+	m := rcptToRE.FindStringSubmatch(arg)
+	if m == nil {
+		s.sendlinef("501 5.1.7 Bad sender address syntax")
+	}
+	err := s.env.AddRecipient(addrString(m[1]))
+	if err != nil {
+		s.sendlinef("501 ??? bad recipient: %v", err)
+		return
+	}
+	s.sendlinef("250 2.1.0 Ok")
 }
 
 type addrString string
@@ -252,36 +272,32 @@ func (a addrString) Hostname() string {
 	return ""
 }
 
-type cmdLine struct {
-	line string
-	verb string // lazily set
+type cmdLine string
+
+func (cl cmdLine) valid() bool {
+	return strings.HasSuffix(string(cl), "\r\n")
 }
 
-func (cl *cmdLine) valid() bool {
-	return strings.HasSuffix(cl.line, "\r\n")
-}
-
-func (cl *cmdLine) Verb() string {
-	if cl.verb == "" {
-		if idx := strings.Index(cl.line, " "); idx != -1 {
-			cl.verb = strings.ToUpper(cl.line[:idx])
-		} else {
-			cl.verb = strings.ToUpper(cl.line[:len(cl.line)-2])
-		}
+func (cl cmdLine) Verb() string {
+	s := string(cl)
+	if idx := strings.Index(s, " "); idx != -1 {
+		return strings.ToUpper(s[:idx])
 	}
-	return cl.verb
+	return strings.ToUpper(s[:len(s)-2])
 }
 
-func (cl *cmdLine) Arg() string {
-	if idx := strings.Index(cl.line, " "); idx != -1 {
-		return cl.line[idx+1 : len(cl.line)-2]
+func (cl cmdLine) Arg() string {
+	s := string(cl)
+	if idx := strings.Index(s, " "); idx != -1 {
+		return s[idx+1 : len(s)-2]
 	}
 	return ""
 }
 
-func (cl *cmdLine) String() string {
+func (cl cmdLine) String() string {
+	s := string(cl)
 	if cl.valid() {
-		return cl.line[:len(cl.line)-2]
+		return s[:len(s)-2]
 	}
-	return cl.line + "[!MISSING_NEWLINE]"
+	return s + "[!MISSING_NEWLINE]"
 }
