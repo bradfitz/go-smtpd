@@ -202,8 +202,13 @@ func (c *conn) handleHello(greeting, host string) {
 	c.helloType = greeting
 	c.helloHost = host
 	fmt.Fprintf(c.bw, "250-%s\r\n", c.srv.hostname())
-	for _, ext := range []string{"250-PIPELINING", "250-SIZE 10240000", "250-ENHANCEDSTATUSCODES",
-		"250-8BITMIME", "250 DSN"} {
+	for _, ext := range []string{
+		"250-PIPELINING",
+		"250-SIZE 10240000",
+		"250-ENHANCEDSTATUSCODES",
+		"250-8BITMIME",
+		"250 DSN",
+	} {
 		fmt.Fprintf(c.bw, "%s\r\n", ext)
 	}
 	c.bw.Flush()
