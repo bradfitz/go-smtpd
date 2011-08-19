@@ -98,16 +98,16 @@ func (srv *Server) Serve(ln net.Listener) os.Error {
 		if srv.WriteTimeout != 0 {
 			rw.SetWriteTimeout(srv.WriteTimeout)
 		}
-		c, err := srv.newConn(rw)
+		sess, err := srv.newSession(rw)
 		if err != nil {
 			continue
 		}
-		go c.serve()
+		go sess.serve()
 	}
 	panic("not reached")
 }
 
-type conn struct {
+type session struct {
 	srv *Server
 	rwc net.Conn
 	br  *bufio.Reader
@@ -119,8 +119,8 @@ type conn struct {
 	helloHost string
 }
 
-func (srv *Server) newConn(rwc net.Conn) (c *conn, err os.Error) {
-	c = &conn{
+func (srv *Server) newSession(rwc net.Conn) (c *session, err os.Error) {
+	c = &session{
 		srv: srv,
 		rwc: rwc,
 		br:  bufio.NewReader(rwc),
@@ -129,24 +129,24 @@ func (srv *Server) newConn(rwc net.Conn) (c *conn, err os.Error) {
 	return
 }
 
-func (c *conn) errorf(format string, args ...interface{}) {
+func (c *session) errorf(format string, args ...interface{}) {
 	log.Printf("Client error: "+format, args...)
 }
 
-func (c *conn) sendf(format string, args ...interface{}) {
+func (c *session) sendf(format string, args ...interface{}) {
 	fmt.Fprintf(c.bw, format, args...)
 	c.bw.Flush()
 }
 
-func (c *conn) sendlinef(format string, args ...interface{}) {
+func (c *session) sendlinef(format string, args ...interface{}) {
 	c.sendf(format+"\r\n", args...)
 }
 
-func (c *conn) Addr() net.Addr {
+func (c *session) Addr() net.Addr {
 	return c.rwc.RemoteAddr()
 }
 
-func (c *conn) serve() {
+func (c *session) serve() {
 	defer c.rwc.Close()
 	if onc := c.srv.OnNewConnection; onc != nil {
 		if err := onc(c); err != nil {
@@ -198,7 +198,7 @@ func (c *conn) serve() {
 	}
 }
 
-func (c *conn) handleHello(greeting, host string) {
+func (c *session) handleHello(greeting, host string) {
 	c.helloType = greeting
 	c.helloHost = host
 	fmt.Fprintf(c.bw, "250-%s\r\n", c.srv.hostname())
@@ -214,7 +214,7 @@ func (c *conn) handleHello(greeting, host string) {
 	c.bw.Flush()
 }
 
-func (c *conn) handleMailFrom(email string) {
+func (c *session) handleMailFrom(email string) {
 	log.Printf("mail from: %q", email)
 	cb := c.srv.OnNewMail
 	if cb == nil {
@@ -225,14 +225,15 @@ func (c *conn) handleMailFrom(email string) {
 	c.env = nil
 	env, err := cb(c, addrString(email))
 	if err != nil {
+		log.Printf("rejecting MAIL FROM %q: %v", email, err)
 		// TODO: send it back to client if warranted, like above
 		return
 	}
 	c.env = env
-	c.sendf("250 2.1.0 Ok\r\n")
+	c.sendlinef("250 2.1.0 Ok")
 }
 
-func (c *conn) handleRcptTo(email string) {
+func (c *session) handleRcptTo(email string) {
 	log.Printf("rcpt to: %q", email)
 	c.sendf("250 2.1.0 Ok\r\n")
 }
