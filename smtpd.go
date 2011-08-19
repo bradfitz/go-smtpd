@@ -252,7 +252,8 @@ func (s *session) handleRcpt(line cmdLine) {
 	}
 	err := s.env.AddRecipient(addrString(m[1]))
 	if err != nil {
-		s.sendlinef("501 ??? bad recipient: %v", err)
+		// TODO: don't always proxy the error to the client
+		s.sendlinef("550 bad recipient: %v", err)
 		return
 	}
 	s.sendlinef("250 2.1.0 Ok")
