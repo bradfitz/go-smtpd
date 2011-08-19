@@ -1,5 +1,9 @@
 package main
 
+// TODO:
+//  -- send 421 to connected clients on graceful server shutdown (s3.8)
+//
+
 import (
 	"bufio"
 	"exec"
@@ -9,11 +13,12 @@ import (
 	"os"
 	"exp/regexp"
 	"strings"
+	"unicode"
 )
 
 var (
 	rcptToRE   = regexp.MustCompile(`(?i)^to:\s*<(.+?)>`)
-	mailFromRE = regexp.MustCompile(`(?i)^from:\s*<(.+?)>`)
+	mailFromRE = regexp.MustCompile(`(?i)^from:\s*<(.*?)>`)
 )
 
 // Server is an SMTP server.
@@ -176,11 +181,12 @@ func (s *session) serve() {
 			return
 		}
 		line := cmdLine(string(sl))
-		if !line.valid() {
-			s.sendlinef("500 ??? invalid line received, not ending in \\r\\n")
-			return
+		if err := line.checkValid(); err != nil {
+			s.sendlinef("500 %v", err)
+			continue
 		}
 		log.Printf("Client: %q, verb: %q", line, line.Verb())
+
 		switch line.Verb() {
 		case "HELO", "EHLO":
 			s.handleHello(line.Verb(), line.Arg())
@@ -275,8 +281,19 @@ func (a addrString) Hostname() string {
 
 type cmdLine string
 
-func (cl cmdLine) valid() bool {
-	return strings.HasSuffix(string(cl), "\r\n")
+func (cl cmdLine) checkValid() os.Error {
+	if !strings.HasSuffix(string(cl), "\r\n") {
+		return os.NewError(`line doesn't end in \r\n`)
+	}
+	// Check for verbs defined not to have an argument
+	// (RFC 5321 s4.1.1)
+	switch cl.Verb() {
+	case "RSET", "DATA", "QUIT":
+		if cl.Arg() != "" {
+			return os.NewError("unexpected argument")
+		}
+	}
+	return nil
 }
 
 func (cl cmdLine) Verb() string {
@@ -290,15 +307,11 @@ func (cl cmdLine) Verb() string {
 func (cl cmdLine) Arg() string {
 	s := string(cl)
 	if idx := strings.Index(s, " "); idx != -1 {
-		return s[idx+1 : len(s)-2]
+		return strings.TrimRightFunc(s[idx+1:len(s)-2], unicode.IsSpace)
 	}
 	return ""
 }
 
 func (cl cmdLine) String() string {
-	s := string(cl)
-	if cl.valid() {
-		return s[:len(s)-2]
-	}
-	return s + "[!MISSING_NEWLINE]"
+	return string(cl)
 }
