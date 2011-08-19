@@ -107,6 +107,8 @@ type conn struct {
 	br  *bufio.Reader
 	bw  *bufio.Writer
 
+	env Envelope // current envelope, or nil
+
 	helloType string
 	helloHost string
 }
@@ -202,10 +204,37 @@ func (c *conn) handleHello(greeting, host string) {
 
 func (c *conn) handleMailFrom(email string) {
 	log.Printf("mail from: %q", email)
+	cb := c.srv.OnNewMail
+	if cb == nil {
+		log.Printf("smtp: Server.OnNewMail is nil; rejecting MAIL FROM")
+		c.sendf("451 Server.OnNewMail not configured\r\n")
+		return
+	}
+	c.env = nil
+	env, err := cb(c, addrString(email))
+	if err != nil {
+		// TODO: send it back to client if warranted, like above
+		return
+	}
+	c.env = env
 	c.sendf("250 2.1.0 Ok\r\n")
 }
 
 func (c *conn) handleRcptTo(email string) {
 	log.Printf("rcpt to: %q", email)
 	c.sendf("250 2.1.0 Ok\r\n")
+}
+
+type addrString string
+
+func (a addrString) Email() string {
+	return string(a)
+}
+
+func (a addrString) Hostname() string {
+	e := string(a)
+	if idx := strings.Index(e, "@"); idx != -1 {
+		return strings.ToLower(e[idx+1:])
+	}
+	return ""
 }
