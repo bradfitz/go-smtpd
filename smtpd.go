@@ -51,6 +51,7 @@ type Connection interface {
 
 type Envelope interface {
 	AddRecipient(rcpt MailAddress) os.Error
+	BeginData() os.Error
 }
 
 type BasicEnvelope struct {
@@ -59,6 +60,13 @@ type BasicEnvelope struct {
 
 func (e *BasicEnvelope) AddRecipient(rcpt MailAddress) os.Error {
 	e.rcpts = append(e.rcpts, rcpt)
+	return nil
+}
+
+func (e *BasicEnvelope) BeginData() os.Error {
+	if len(e.rcpts) == 0 {
+		return SMTPError("554 5.5.1 Error: no valid recipients")
+	}
 	return nil
 }
 
@@ -208,7 +216,7 @@ func (s *session) serve() {
 		case "RCPT":
 			s.handleRcpt(line)
 		case "DATA":
-			s.sendlinef("354 Go ahead")
+			s.handleData()
 		default:
 			log.Printf("Client: %q, verhb: %q", line, line.Verb())
 			s.sendlinef("502 5.5.2 Error: command not recognized")
@@ -284,6 +292,26 @@ func (s *session) handleRcpt(line cmdLine) {
 	s.sendlinef("250 2.1.0 Ok")
 }
 
+func (s *session) handleData() {
+	if s.env == nil {
+		s.sendlinef("503 5.5.1 Error: need RCPT command")
+		return
+	}
+	if err := s.env.BeginData(); err != nil {
+		s.handleError(err)
+		return
+	}
+	s.sendlinef("354 Go ahead")
+}
+
+func (s *session) handleError(err os.Error) {
+	if se, ok := err.(SMTPError); ok {
+		s.sendlinef("%s", se)
+		return
+	}
+	log.Printf("Error: %s", err)
+}
+
 type addrString string
 
 func (a addrString) Email() string {
@@ -333,4 +361,10 @@ func (cl cmdLine) Arg() string {
 
 func (cl cmdLine) String() string {
 	return string(cl)
+}
+
+type SMTPError string
+
+func (e SMTPError) String() string {
+	return string(e)
 }
