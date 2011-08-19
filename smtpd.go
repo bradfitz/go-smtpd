@@ -185,7 +185,6 @@ func (s *session) serve() {
 			s.sendlinef("500 %v", err)
 			continue
 		}
-		log.Printf("Client: %q, verb: %q", line, line.Verb())
 
 		switch line.Verb() {
 		case "HELO", "EHLO":
@@ -195,6 +194,8 @@ func (s *session) serve() {
 			return
 		case "RSET":
 			s.env = nil
+			s.sendlinef("250 2.0.0 OK")
+		case "NOOP":
 			s.sendlinef("250 2.0.0 OK")
 		case "MAIL":
 			arg := line.Arg() // "From:<foo@bar.com>"
@@ -209,6 +210,7 @@ func (s *session) serve() {
 		case "DATA":
 			s.sendlinef("354 Go ahead")
 		default:
+			log.Printf("Client: %q, verb: %q", line, line.Verb())
 			s.sendlinef("502 5.5.2 Error: command not recognized")
 		}
 	}
