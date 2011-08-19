@@ -7,7 +7,13 @@ import (
 	"log"
 	"net"
 	"os"
+	"exp/regexp"
 	"strings"
+)
+
+var (
+	rcptToRE   = regexp.MustCompile(`(?i)^to:\s*<(.+?)>`)
+	mailFromRE = regexp.MustCompile(`(?i)^from:\s*<(.+?)>`)
 )
 
 // Server is an SMTP server.
@@ -132,6 +138,10 @@ func (c *conn) sendf(format string, args ...interface{}) {
 	c.bw.Flush()
 }
 
+func (c *conn) sendlinef(format string, args ...interface{}) {
+	c.sendf(format+"\r\n", args...)
+}
+
 func (c *conn) Addr() net.Addr {
 	return c.rwc.RemoteAddr()
 }
@@ -145,48 +155,45 @@ func (c *conn) serve() {
 			return
 		}
 	}
-	c.sendf("220 %s ESMTP gosmtpd (Ajas)\r\n", c.srv.hostname())
+	c.sendf("220 %s ESMTP gosmtpd (Gosmtpd)\r\n", c.srv.hostname())
 	for {
-		lines, err := c.br.ReadSlice('\n')
+		sl, err := c.br.ReadSlice('\n')
 		if err != nil {
 			c.errorf("read error: %v", err)
 			return
 		}
-		line := string(lines)
-		switch {
-		case strings.HasSuffix(line, "\r\n"):
-			line = line[:len(line)-2]
-		case strings.HasSuffix(line, "\n"):
-			line = line[:len(line)-1]
-		default:
-			c.errorf("received line not ending in newline: %q", line)
+		line := cmdLine{line: string(sl)}
+		if !line.valid() {
+			c.sendlinef("500 ??? invalid line received, not ending in \\r\\n")
 			return
 		}
-		prefix := func(s string) bool {
-			return strings.HasPrefix(line, s)
-		}
-		log.Printf("Client: %q", line)
-		switch {
-		case prefix("HELO ") || prefix("EHLO "):
-			c.handleHello(line[:4], line[5:])
-		case prefix("MAIL FROM:<"):
-			gt := strings.Index(line, ">")
-			if gt == -1 {
-				c.sendf("501 5.1.7 Bad sender address syntax\r\n")
+		log.Printf("Client: %q, verb: %q", line, line.Verb())
+		switch line.Verb() {
+		case "HELO", "EHLO":
+			c.handleHello(line.Verb(), line.Arg())
+		case "QUIT":
+			c.sendlinef("221 2.0.0 Bye")
+			return
+		case "MAIL":
+			arg := line.Arg() // "From:<foo@bar.com>"
+			m := mailFromRE.FindStringSubmatch(arg)
+			if m == nil {
+				c.sendlinef("501 5.1.7 Bad sender address syntax")
 				continue
 			}
-			c.handleMailFrom(line[len("MAIL FROM:<"):gt])
-		case prefix("RCPT TO:<"):
-			gt := strings.Index(line, ">")
-			if gt == -1 {
-				c.sendf("501 5.1.7 Bad sender address syntax\r\n")
+			c.handleMailFrom(m[1])
+		case "RCPT":
+			arg := line.Arg() // "To:<foo@bar.com>"
+			m := rcptToRE.FindStringSubmatch(arg)
+			if m == nil {
+				c.sendlinef("501 5.1.7 Bad sender address syntax")
 				continue
 			}
-			c.handleRcptTo(line[len("RCPT TO:<"):gt])
-		case line == "DATA":
-			c.sendf("354 Go ahead\r\n")
+			c.handleRcptTo(m[1])
+		case "DATA":
+			c.sendlinef("354 Go ahead")
 		default:
-
+			c.sendlinef("502 5.5.2 Error: command not recognized")
 		}
 	}
 }
@@ -237,4 +244,38 @@ func (a addrString) Hostname() string {
 		return strings.ToLower(e[idx+1:])
 	}
 	return ""
+}
+
+type cmdLine struct {
+	line string
+	verb string // lazily set
+}
+
+func (cl *cmdLine) valid() bool {
+	return strings.HasSuffix(cl.line, "\r\n")
+}
+
+func (cl *cmdLine) Verb() string {
+	if cl.verb == "" {
+		if idx := strings.Index(cl.line, " "); idx != -1 {
+			cl.verb = strings.ToUpper(cl.line[:idx])
+		} else {
+			cl.verb = strings.ToUpper(cl.line[:len(cl.line)-2])
+		}
+	}
+	return cl.verb
+}
+
+func (cl *cmdLine) Arg() string {
+	if idx := strings.Index(cl.line, " "); idx != -1 {
+		return cl.line[idx+1 : len(cl.line)-2]
+	}
+	return ""
+}
+
+func (cl *cmdLine) String() string {
+	if cl.valid() {
+		return cl.line[:len(cl.line)-2]
+	}
+	return cl.line + "[!MISSING_NEWLINE]"
 }
