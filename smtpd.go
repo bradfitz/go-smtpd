@@ -210,7 +210,7 @@ func (s *session) serve() {
 		case "DATA":
 			s.sendlinef("354 Go ahead")
 		default:
-			log.Printf("Client: %q, verb: %q", line, line.Verb())
+			log.Printf("Client: %q, verhb: %q", line, line.Verb())
 			s.sendlinef("502 5.5.2 Error: command not recognized")
 		}
 	}
@@ -233,6 +233,11 @@ func (s *session) handleHello(greeting, host string) {
 }
 
 func (s *session) handleMailFrom(email string) {
+	// TODO: 4.1.1.11.  If the server SMTP does not recognize or
+	// cannot implement one or more of the parameters associated
+	// qwith a particular MAIL FROM or RCPT TO command, it will return
+	// code 555.
+
 	if s.env != nil {
 		s.sendlinef("503 5.5.1 Error: nested MAIL command")
 		return
@@ -256,6 +261,11 @@ func (s *session) handleMailFrom(email string) {
 }
 
 func (s *session) handleRcpt(line cmdLine) {
+	// TODO: 4.1.1.11.  If the server SMTP does not recognize or
+	// cannot implement one or more of the parameters associated
+	// qwith a particular MAIL FROM or RCPT TO command, it will return
+	// code 555.
+
 	if s.env == nil {
 		s.sendlinef("503 5.5.1 Error: need MAIL command")
 		return
