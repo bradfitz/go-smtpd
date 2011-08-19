@@ -193,6 +193,9 @@ func (s *session) serve() {
 		case "QUIT":
 			s.sendlinef("221 2.0.0 Bye")
 			return
+		case "RSET":
+			s.env = nil
+			s.sendlinef("250 2.0.0 OK")
 		case "MAIL":
 			arg := line.Arg() // "From:<foo@bar.com>"
 			m := mailFromRE.FindStringSubmatch(arg)
@@ -228,6 +231,10 @@ func (s *session) handleHello(greeting, host string) {
 }
 
 func (s *session) handleMailFrom(email string) {
+	if s.env != nil {
+		s.sendlinef("503 5.5.1 Error: nested MAIL command")
+		return
+	}
 	log.Printf("mail from: %q", email)
 	cb := s.srv.OnNewMail
 	if cb == nil {
