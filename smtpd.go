@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"exec"
 	"fmt"
 	"log"
@@ -17,8 +18,9 @@ import (
 )
 
 var (
-	rcptToRE   = regexp.MustCompile(`(?i)^to:\s*<(.+?)>`)
-	mailFromRE = regexp.MustCompile(`(?i)^from:\s*<(.*?)>`)
+	rcptToRE   = regexp.MustCompile(`[Tt][Oo]:<(.+)>`)
+	//mailFromRE = regexp.MustCompile(`(?i)^from:\s*<(.*?)>`)
+	mailFromRE = regexp.MustCompile(`[Ff][Rr][Oo][Mm]:<(.*)>`)
 )
 
 // Server is an SMTP server.
@@ -52,6 +54,7 @@ type Connection interface {
 type Envelope interface {
 	AddRecipient(rcpt MailAddress) os.Error
 	BeginData() os.Error
+	Write(line []byte) os.Error
 }
 
 type BasicEnvelope struct {
@@ -70,11 +73,9 @@ func (e *BasicEnvelope) BeginData() os.Error {
 	return nil
 }
 
-// ArrivingMessage is the interface that must be implement by servers
-// receiving mail.
-type ArrivingMessage interface {
-	AddHeaderLine(s string) os.Error
-	EndHeaders() os.Error
+func (e *BasicEnvelope) Write(line []byte) os.Error {
+	log.Printf("Line: %q", string(line))
+	return nil
 }
 
 func (srv *Server) hostname() string {
@@ -164,6 +165,14 @@ func (s *session) sendlinef(format string, args ...interface{}) {
 	s.sendf(format+"\r\n", args...)
 }
 
+func (s *session) sendSMTPErrorOrLinef(err os.Error, format string, args ...interface{}) {
+	if se, ok := err.(SMTPError); ok {
+		s.sendlinef("%s", se.String())
+		return
+	}
+	s.sendlinef(format, args...)
+}
+
 func (s *session) Addr() net.Addr {
 	return s.rwc.RemoteAddr()
 }
@@ -172,12 +181,7 @@ func (s *session) serve() {
 	defer s.rwc.Close()
 	if onc := s.srv.OnNewConnection; onc != nil {
 		if err := onc(s); err != nil {
-			// TODO: if the error implements a SMTPErrorStringer,
-			// call it and send the error back
-			//
-			// TODO: if the user error is 554 (rejecting this connection),
-			// we should relay that back too, and stick around for
-			// a bit (see RFC 5321 3.1)
+			s.sendSMTPErrorOrLinef(err, "554 connection rejected")
 			return
 		}
 	}
@@ -209,6 +213,7 @@ func (s *session) serve() {
 			arg := line.Arg() // "From:<foo@bar.com>"
 			m := mailFromRE.FindStringSubmatch(arg)
 			if m == nil {
+				log.Printf("invalid MAIL arg: %q", arg)
 				s.sendlinef("501 5.1.7 Bad sender address syntax")
 				continue
 			}
@@ -281,12 +286,13 @@ func (s *session) handleRcpt(line cmdLine) {
 	arg := line.Arg() // "To:<foo@bar.com>"
 	m := rcptToRE.FindStringSubmatch(arg)
 	if m == nil {
+		log.Printf("bad RCPT address: %q", arg)
 		s.sendlinef("501 5.1.7 Bad sender address syntax")
+		return
 	}
 	err := s.env.AddRecipient(addrString(m[1]))
 	if err != nil {
-		// TODO: don't always proxy the error to the client
-		s.sendlinef("550 bad recipient: %v", err)
+		s.sendSMTPErrorOrLinef(err, "550 bad recipient")
 		return
 	}
 	s.sendlinef("250 2.1.0 Ok")
@@ -302,6 +308,25 @@ func (s *session) handleData() {
 		return
 	}
 	s.sendlinef("354 Go ahead")
+	for {
+		sl, err := s.br.ReadSlice('\n')
+		if err != nil {
+			s.errorf("read error: %v", err)
+			return
+		}
+		if bytes.Equal(sl, []byte(".\r\n")) {
+			break
+		}
+		if sl[0] == '.' {
+			sl = sl[1:]
+		}
+		err = s.env.Write(sl)
+		if err != nil {
+			s.sendSMTPErrorOrLinef(err, "550 ??? failed")
+			return
+		}
+	}
+	s.sendlinef("250 2.0.0 Ok: queued")
 }
 
 func (s *session) handleError(err os.Error) {
