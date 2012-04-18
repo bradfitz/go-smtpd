@@ -1,25 +1,25 @@
 package main
 
 import (
+	"errors"
 	"log"
-	"os"
 	"strings"
 
-	"go-smtpd.googlecode.com/git/smtpd"
+	"code.google.com/p/go-smtpd/smtpd"
 )
 
 type env struct {
 	*smtpd.BasicEnvelope
 }
 
-func (e *env) AddRecipient(rcpt smtpd.MailAddress) os.Error {
+func (e *env) AddRecipient(rcpt smtpd.MailAddress) error {
 	if strings.HasPrefix(rcpt.Email(), "bad@") {
-		return os.NewError("we don't send email to bad@")
+		return errors.New("we don't send email to bad@")
 	}
 	return e.BasicEnvelope.AddRecipient(rcpt)
 }
 
-func onNewMail(c smtpd.Connection, from smtpd.MailAddress) (smtpd.Envelope, os.Error) {
+func onNewMail(c smtpd.Connection, from smtpd.MailAddress) (smtpd.Envelope, error) {
 	log.Printf("ajas: new mail from %q", from)
 	return &env{new(smtpd.BasicEnvelope)}, nil
 }

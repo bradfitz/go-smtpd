@@ -9,18 +9,19 @@ package smtpd
 import (
 	"bufio"
 	"bytes"
-	"exec"
+	"errors"
+	"regexp"
 	"fmt"
 	"log"
 	"net"
-	"os"
-	"exp/regexp"
+	"os/exec"
 	"strings"
+	"time"
 	"unicode"
 )
 
 var (
-	rcptToRE   = regexp.MustCompile(`[Tt][Oo]:<(.+)>`)
+	rcptToRE = regexp.MustCompile(`[Tt][Oo]:<(.+)>`)
 	//mailFromRE = regexp.MustCompile(`(?i)^from:\s*<(.*?)>`)
 	mailFromRE = regexp.MustCompile(`[Ff][Rr][Oo][Mm]:<(.*)>`)
 )
@@ -29,16 +30,16 @@ var (
 type Server struct {
 	Addr         string // TCP address to listen on, ":25" if empty
 	Hostname     string // optional Hostname to announce; "" to use system hostname
-	ReadTimeout  int64  // optional net.Conn.SetReadTimeout value for new connections
-	WriteTimeout int64  // optional net.Conn.SetWriteTimeout value for new connections
+	ReadTimeout  time.Duration  // optional read timeout
+	WriteTimeout time.Duration  // optional write timeout
 
 	// OnNewConnection, if non-nil, is called on new connections.
 	// If it returns non-nil, the connection is closed.
-	OnNewConnection func(c Connection) os.Error
+	OnNewConnection func(c Connection) error
 
 	// OnNewMail must be defined and is called when a new message beings.
 	// (when a MAIL FROM line arrives)
-	OnNewMail func(c Connection, from MailAddress) (Envelope, os.Error)
+	OnNewMail func(c Connection, from MailAddress) (Envelope, error)
 }
 
 // MailAddress is defined by 
@@ -54,28 +55,28 @@ type Connection interface {
 }
 
 type Envelope interface {
-	AddRecipient(rcpt MailAddress) os.Error
-	BeginData() os.Error
-	Write(line []byte) os.Error
+	AddRecipient(rcpt MailAddress) error
+	BeginData() error
+	Write(line []byte) error
 }
 
 type BasicEnvelope struct {
 	rcpts []MailAddress
 }
 
-func (e *BasicEnvelope) AddRecipient(rcpt MailAddress) os.Error {
+func (e *BasicEnvelope) AddRecipient(rcpt MailAddress) error {
 	e.rcpts = append(e.rcpts, rcpt)
 	return nil
 }
 
-func (e *BasicEnvelope) BeginData() os.Error {
+func (e *BasicEnvelope) BeginData() error {
 	if len(e.rcpts) == 0 {
 		return SMTPError("554 5.5.1 Error: no valid recipients")
 	}
 	return nil
 }
 
-func (e *BasicEnvelope) Write(line []byte) os.Error {
+func (e *BasicEnvelope) Write(line []byte) error {
 	log.Printf("Line: %q", string(line))
 	return nil
 }
@@ -94,7 +95,7 @@ func (srv *Server) hostname() string {
 // ListenAndServe listens on the TCP network address srv.Addr and then
 // calls Serve to handle requests on incoming connections.  If
 // srv.Addr is blank, ":25" is used.
-func (srv *Server) ListenAndServe() os.Error {
+func (srv *Server) ListenAndServe() error {
 	addr := srv.Addr
 	if addr == "" {
 		addr = ":25"
@@ -106,7 +107,7 @@ func (srv *Server) ListenAndServe() os.Error {
 	return srv.Serve(ln)
 }
 
-func (srv *Server) Serve(ln net.Listener) os.Error {
+func (srv *Server) Serve(ln net.Listener) error {
 	defer ln.Close()
 	for {
 		rw, e := ln.Accept()
@@ -116,12 +117,6 @@ func (srv *Server) Serve(ln net.Listener) os.Error {
 				continue
 			}
 			return e
-		}
-		if srv.ReadTimeout != 0 {
-			rw.SetReadTimeout(srv.ReadTimeout)
-		}
-		if srv.WriteTimeout != 0 {
-			rw.SetWriteTimeout(srv.WriteTimeout)
 		}
 		sess, err := srv.newSession(rw)
 		if err != nil {
@@ -144,7 +139,7 @@ type session struct {
 	helloHost string
 }
 
-func (srv *Server) newSession(rwc net.Conn) (s *session, err os.Error) {
+func (srv *Server) newSession(rwc net.Conn) (s *session, err error) {
 	s = &session{
 		srv: srv,
 		rwc: rwc,
@@ -159,6 +154,9 @@ func (s *session) errorf(format string, args ...interface{}) {
 }
 
 func (s *session) sendf(format string, args ...interface{}) {
+	if s.srv.WriteTimeout != 0 {
+		s.rwc.SetWriteDeadline(time.Now().Add(s.srv.WriteTimeout))
+	}
 	fmt.Fprintf(s.bw, format, args...)
 	s.bw.Flush()
 }
@@ -167,9 +165,9 @@ func (s *session) sendlinef(format string, args ...interface{}) {
 	s.sendf(format+"\r\n", args...)
 }
 
-func (s *session) sendSMTPErrorOrLinef(err os.Error, format string, args ...interface{}) {
+func (s *session) sendSMTPErrorOrLinef(err error, format string, args ...interface{}) {
 	if se, ok := err.(SMTPError); ok {
-		s.sendlinef("%s", se.String())
+		s.sendlinef("%s", se.Error())
 		return
 	}
 	s.sendlinef(format, args...)
@@ -189,6 +187,9 @@ func (s *session) serve() {
 	}
 	s.sendf("220 %s ESMTP gosmtpd\r\n", s.srv.hostname())
 	for {
+		if s.srv.ReadTimeout != 0 {
+			s.rwc.SetReadDeadline(time.Now().Add(s.srv.ReadTimeout))
+		}
 		sl, err := s.br.ReadSlice('\n')
 		if err != nil {
 			s.errorf("read error: %v", err)
@@ -331,7 +332,7 @@ func (s *session) handleData() {
 	s.sendlinef("250 2.0.0 Ok: queued")
 }
 
-func (s *session) handleError(err os.Error) {
+func (s *session) handleError(err error) {
 	if se, ok := err.(SMTPError); ok {
 		s.sendlinef("%s", se)
 		return
@@ -355,16 +356,16 @@ func (a addrString) Hostname() string {
 
 type cmdLine string
 
-func (cl cmdLine) checkValid() os.Error {
+func (cl cmdLine) checkValid() error {
 	if !strings.HasSuffix(string(cl), "\r\n") {
-		return os.NewError(`line doesn't end in \r\n`)
+		return errors.New(`line doesn't end in \r\n`)
 	}
 	// Check for verbs defined not to have an argument
 	// (RFC 5321 s4.1.1)
 	switch cl.Verb() {
 	case "RSET", "DATA", "QUIT":
 		if cl.Arg() != "" {
-			return os.NewError("unexpected argument")
+			return errors.New("unexpected argument")
 		}
 	}
 	return nil
@@ -392,6 +393,6 @@ func (cl cmdLine) String() string {
 
 type SMTPError string
 
-func (e SMTPError) String() string {
+func (e SMTPError) Error() string {
 	return string(e)
 }
