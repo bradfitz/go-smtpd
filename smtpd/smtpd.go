@@ -58,6 +58,7 @@ type Envelope interface {
 	AddRecipient(rcpt MailAddress) error
 	BeginData() error
 	Write(line []byte) error
+	Close() error
 }
 
 type BasicEnvelope struct {
@@ -78,6 +79,10 @@ func (e *BasicEnvelope) BeginData() error {
 
 func (e *BasicEnvelope) Write(line []byte) error {
 	log.Printf("Line: %q", string(line))
+	return nil
+}
+
+func (e *BasicEnvelope) Close() error {
 	return nil
 }
 
@@ -329,6 +334,7 @@ func (s *session) handleData() {
 			return
 		}
 	}
+	s.env.Close()
 	s.sendlinef("250 2.0.0 Ok: queued")
 }
 
