@@ -336,6 +336,7 @@ func (s *session) handleData() {
 	}
 	s.env.Close()
 	s.sendlinef("250 2.0.0 Ok: queued")
+	s.env = nil
 }
 
 func (s *session) handleError(err error) {
@@ -344,6 +345,7 @@ func (s *session) handleError(err error) {
 		return
 	}
 	log.Printf("Error: %s", err)
+	s.env = nil
 }
 
 type addrString string
