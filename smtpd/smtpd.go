@@ -33,6 +33,8 @@ type Server struct {
 	ReadTimeout  time.Duration  // optional read timeout
 	WriteTimeout time.Duration  // optional write timeout
 
+	PlainAuth bool // advertise plain auth (assumes you're on SSL)
+
 	// OnNewConnection, if non-nil, is called on new connections.
 	// If it returns non-nil, the connection is closed.
 	OnNewConnection func(c Connection) error
@@ -241,13 +243,16 @@ func (s *session) handleHello(greeting, host string) {
 	s.helloType = greeting
 	s.helloHost = host
 	fmt.Fprintf(s.bw, "250-%s\r\n", s.srv.hostname())
-	for _, ext := range []string{
-		"250-PIPELINING",
+	extensions := []string{}
+	if s.srv.PlainAuth {
+		extensions = append(extensions, "250-AUTH PLAIN")
+	}
+	extensions = append(extensions, "250-PIPELINING",
 		"250-SIZE 10240000",
 		"250-ENHANCEDSTATUSCODES",
 		"250-8BITMIME",
-		"250 DSN",
-	} {
+		"250 DSN")
+	for _, ext := range extensions {
 		fmt.Fprintf(s.bw, "%s\r\n", ext)
 	}
 	s.bw.Flush()
