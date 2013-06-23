@@ -279,7 +279,11 @@ func (s *session) handleMailFrom(email string) {
 	env, err := cb(s, addrString(email))
 	if err != nil {
 		log.Printf("rejecting MAIL FROM %q: %v", email, err)
-		// TODO: send it back to client if warranted, like above
+		s.sendf("451 denied\r\n")
+
+		s.bw.Flush()
+		time.Sleep(100 * time.Millisecond)
+		s.rwc.Close()
 		return
 	}
 	s.env = env
