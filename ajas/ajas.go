@@ -5,7 +5,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/bradfitz/go-smtpd/smtpd"
+	"github.com/kardianos/go-smtpd/smtpd"
 )
 
 type env struct {
@@ -19,9 +19,16 @@ func (e *env) AddRecipient(rcpt smtpd.MailAddress) error {
 	return e.BasicEnvelope.AddRecipient(rcpt)
 }
 
+func onLog(line []byte) error {
+	log.Printf("Line: %q", string(line))
+	return nil
+}
+
 func onNewMail(c smtpd.Connection, from smtpd.MailAddress) (smtpd.Envelope, error) {
 	log.Printf("ajas: new mail from %q", from)
-	return &env{new(smtpd.BasicEnvelope)}, nil
+	e := new(smtpd.BasicEnvelope)
+	e.Log = onLog
+	return &env{e}, nil
 }
 
 func main() {
