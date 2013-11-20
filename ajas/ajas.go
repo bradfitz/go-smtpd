@@ -36,6 +36,9 @@ func main() {
 		Addr:      ":2500",
 		OnNewMail: onNewMail,
 	}
+	s.OnProtoError = func(err error) {
+		log.Print(err.Error())
+	}
 	err := s.ListenAndServe()
 	if err != nil {
 		log.Fatalf("ListenAndServe: %v", err)
