@@ -10,11 +10,11 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"regexp"
 	"fmt"
 	"log"
 	"net"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -28,10 +28,10 @@ var (
 
 // Server is an SMTP server.
 type Server struct {
-	Addr         string // TCP address to listen on, ":25" if empty
-	Hostname     string // optional Hostname to announce; "" to use system hostname
-	ReadTimeout  time.Duration  // optional read timeout
-	WriteTimeout time.Duration  // optional write timeout
+	Addr         string        // TCP address to listen on, ":25" if empty
+	Hostname     string        // optional Hostname to announce; "" to use system hostname
+	ReadTimeout  time.Duration // optional read timeout
+	WriteTimeout time.Duration // optional write timeout
 
 	PlainAuth bool // advertise plain auth (assumes you're on SSL)
 
@@ -44,7 +44,7 @@ type Server struct {
 	OnNewMail func(c Connection, from MailAddress) (Envelope, error)
 }
 
-// MailAddress is defined by 
+// MailAddress is defined by
 type MailAddress interface {
 	Email() string    // email address, as provided
 	Hostname() string // canonical hostname, lowercase
