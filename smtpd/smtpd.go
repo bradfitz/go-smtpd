@@ -42,6 +42,9 @@ type Server struct {
 	// OnNewMail must be defined and is called when a new message beings.
 	// (when a MAIL FROM line arrives)
 	OnNewMail func(c Connection, from MailAddress) (Envelope, error)
+
+	// OnCloseConnection, if non-nil, is called when a connection is closed.
+	OnCloseConnection func(c Connection) error
 }
 
 // MailAddress is defined by
@@ -185,7 +188,11 @@ func (s *session) Addr() net.Addr {
 }
 
 func (s *session) serve() {
+	if occ := s.srv.OnCloseConnection; occ != nil {
+		defer occ(s)
+	}
 	defer s.rwc.Close()
+
 	if onc := s.srv.OnNewConnection; onc != nil {
 		if err := onc(s); err != nil {
 			s.sendSMTPErrorOrLinef(err, "554 connection rejected")
