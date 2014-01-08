@@ -21,9 +21,9 @@ import (
 )
 
 var (
-	rcptToRE = regexp.MustCompile(`[Tt][Oo]:<(.+)>`)
+	rcptToRE = regexp.MustCompile(`[Tt][Oo]:\s*<(.+)>`)
 	//mailFromRE = regexp.MustCompile(`(?i)^from:\s*<(.*?)>`)
-	mailFromRE = regexp.MustCompile(`[Ff][Rr][Oo][Mm]:<(.*)>`)
+	mailFromRE = regexp.MustCompile(`[Ff][Rr][Oo][Mm]:\s*<(.*)>`)
 )
 
 // Server is an SMTP server.
