@@ -343,7 +343,10 @@ func (s *session) handleData() {
 			return
 		}
 	}
-	s.env.Close()
+	if err := s.env.Close(); err != nil {
+		s.handleError(err)
+		return
+	}
 	s.sendlinef("250 2.0.0 Ok: queued")
 	s.env = nil
 }
