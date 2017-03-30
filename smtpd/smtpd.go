@@ -1,3 +1,7 @@
+// Copyright 2011 The go-smtpd Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 // Package smtpd implements an SMTP server. Hooks are provided to customize
 // its behavior.
 package smtpd
