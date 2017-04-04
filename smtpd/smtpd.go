@@ -58,6 +58,7 @@ type MailAddress interface {
 // customizing their own Servers.
 type Connection interface {
 	Addr() net.Addr
+	Close() error // to force-close a connection
 }
 
 type Envelope interface {
@@ -188,6 +189,8 @@ func (s *session) Addr() net.Addr {
 	return s.rwc.RemoteAddr()
 }
 
+func (s *session) Close() error { return s.rwc.Close() }
+
 func (s *session) serve() {
 	defer s.rwc.Close()
 	if onc := s.srv.OnNewConnection; onc != nil {
@@ -272,7 +275,6 @@ func (s *session) handleMailFrom(email string) {
 		s.sendlinef("503 5.5.1 Error: nested MAIL command")
 		return
 	}
-	log.Printf("mail from: %q", email)
 	cb := s.srv.OnNewMail
 	if cb == nil {
 		log.Printf("smtp: Server.OnNewMail is nil; rejecting MAIL FROM")
