@@ -13,6 +13,7 @@ package smtpd
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
@@ -37,7 +38,8 @@ type Server struct {
 	ReadTimeout  time.Duration // optional read timeout
 	WriteTimeout time.Duration // optional write timeout
 
-	PlainAuth bool // advertise plain auth (assumes you're on SSL)
+	PlainAuth bool        // advertise plain auth (assumes you're on SSL)
+	StartTLS  *tls.Config // advertise STARTTLS and use the given config to upgrade the connection with
 
 	// OnNewConnection, if non-nil, is called on new connections.
 	// If it returns non-nil, the connection is closed.
@@ -136,7 +138,6 @@ func (srv *Server) Serve(ln net.Listener) error {
 		}
 		go sess.serve()
 	}
-	panic("not reached")
 }
 
 type session struct {
@@ -218,6 +219,16 @@ func (s *session) serve() {
 		switch line.Verb() {
 		case "HELO", "EHLO":
 			s.handleHello(line.Verb(), line.Arg())
+		case "STARTTLS":
+			if s.srv.StartTLS == nil {
+				s.sendlinef("502 5.5.2 Error: command not recognized")
+				continue
+			}
+			s.sendlinef("220 Ready to start TLS")
+			if err := s.handleStartTLS(); err != nil {
+				s.errorf("failed to start tls: %s", err)
+				s.sendSMTPErrorOrLinef(err, "550 ??? failed")
+			}
 		case "QUIT":
 			s.sendlinef("221 2.0.0 Bye")
 			return
@@ -246,6 +257,18 @@ func (s *session) serve() {
 	}
 }
 
+func (s *session) handleStartTLS() error {
+	tlsConn := tls.Server(s.rwc, s.srv.StartTLS)
+	err := tlsConn.Handshake()
+	if err != nil {
+		return err
+	}
+	s.rwc = net.Conn(tlsConn)
+	s.bw.Reset(s.rwc)
+	s.br.Reset(s.rwc)
+	return nil
+}
+
 func (s *session) handleHello(greeting, host string) {
 	s.helloType = greeting
 	s.helloHost = host
@@ -253,6 +276,9 @@ func (s *session) handleHello(greeting, host string) {
 	extensions := []string{}
 	if s.srv.PlainAuth {
 		extensions = append(extensions, "250-AUTH PLAIN")
+	}
+	if s.srv.StartTLS != nil {
+		extensions = append(extensions, "250-STARTTLS")
 	}
 	extensions = append(extensions, "250-PIPELINING",
 		"250-SIZE 10240000",
