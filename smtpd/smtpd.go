@@ -224,6 +224,7 @@ func (s *session) serve() {
 				s.sendlinef("502 5.5.2 Error: command not recognized")
 				continue
 			}
+			s.sendlinef("220 Ready to start TLS")
 			if err := s.handleStartTLS(); err != nil {
 				s.errorf("failed to start tls: %s", err)
 				s.sendSMTPErrorOrLinef(err, "550 ??? failed")
@@ -263,6 +264,8 @@ func (s *session) handleStartTLS() error {
 		return err
 	}
 	s.rwc = net.Conn(tlsConn)
+	s.bw.Reset(s.rwc)
+	s.br.Reset(s.rwc)
 	return nil
 }
 
