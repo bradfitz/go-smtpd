@@ -13,21 +13,23 @@ package smtpd
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 )
 
 var (
-	rcptToRE = regexp.MustCompile(`[Tt][Oo]:<(.+)>`)
-	//mailFromRE = regexp.MustCompile(`(?i)^from:\s*<(.*?)>`)
-	mailFromRE = regexp.MustCompile(`[Ff][Rr][Oo][Mm]:<(.*)>`)
+	rcptToRE   = regexp.MustCompile(`^[Tt][Oo]:<(.+)>`)
+	mailFromRE = regexp.MustCompile(`^[Ff][Rr][Oo][Mm]:<([^>]*)>(.*)$`)
+	mailSizeRE = regexp.MustCompile(`[Ss][Ii][Zz][Ee]=(\d+)`)
 )
 
 // Server is an SMTP server.
@@ -37,7 +39,9 @@ type Server struct {
 	ReadTimeout  time.Duration // optional read timeout
 	WriteTimeout time.Duration // optional write timeout
 
-	PlainAuth bool // advertise plain auth (assumes you're on SSL)
+	PlainAuth bool        // advertise plain auth (assumes you're on SSL)
+	TLSConfig *tls.Config // advertise STARTTLS and use the given config to upgrade the connection with
+	MaxSize   int         // maximum email size to report
 
 	// OnNewConnection, if non-nil, is called on new connections.
 	// If it returns non-nil, the connection is closed.
@@ -45,7 +49,11 @@ type Server struct {
 
 	// OnNewMail must be defined and is called when a new message beings.
 	// (when a MAIL FROM line arrives)
-	OnNewMail func(c Connection, from MailAddress) (Envelope, error)
+	OnNewMail func(c Connection, from MailAddress, size *int) (Envelope, error)
+
+	// Log overrides standard logging
+	// If nil, log.Printf is used
+	Log func(format string, args ...interface{})
 }
 
 // MailAddress is defined by
@@ -85,12 +93,20 @@ func (e *BasicEnvelope) BeginData() error {
 }
 
 func (e *BasicEnvelope) Write(line []byte) error {
-	log.Printf("Line: %q", string(line))
+	fmt.Printf("Line: %q", string(line))
 	return nil
 }
 
 func (e *BasicEnvelope) Close() error {
 	return nil
+}
+
+func (srv *Server) log(format string, args ...interface{}) {
+	if srv.Log != nil {
+		srv.Log(format, args...)
+		return
+	}
+	log.Printf("smtpd: "+format, args...)
 }
 
 func (srv *Server) hostname() string {
@@ -125,7 +141,7 @@ func (srv *Server) Serve(ln net.Listener) error {
 		rw, e := ln.Accept()
 		if e != nil {
 			if ne, ok := e.(net.Error); ok && ne.Temporary() {
-				log.Printf("smtpd: Accept error: %v", e)
+				srv.log("Accept error: %v", e)
 				continue
 			}
 			return e
@@ -162,7 +178,7 @@ func (srv *Server) newSession(rwc net.Conn) (s *session, err error) {
 }
 
 func (s *session) errorf(format string, args ...interface{}) {
-	log.Printf("Client error: "+format, args...)
+	s.srv.log("Client error: "+format, args...)
 }
 
 func (s *session) sendf(format string, args ...interface{}) {
@@ -218,6 +234,14 @@ func (s *session) serve() {
 		switch line.Verb() {
 		case "HELO", "EHLO":
 			s.handleHello(line.Verb(), line.Arg())
+		case "STARTTLS":
+			if s.srv.TLSConfig == nil {
+				s.sendlinef("502 5.5.2 Error: command not recognized")
+				continue
+			}
+			if err := s.handleStartTLS(); err != nil {
+				s.errorf("failed to start tls: %s", err)
+			}
 		case "QUIT":
 			s.sendlinef("221 2.0.0 Bye")
 			return
@@ -230,17 +254,27 @@ func (s *session) serve() {
 			arg := line.Arg() // "From:<foo@bar.com>"
 			m := mailFromRE.FindStringSubmatch(arg)
 			if m == nil {
-				log.Printf("invalid MAIL arg: %q", arg)
+				s.srv.log("Invalid MAIL arg: %q", arg)
 				s.sendlinef("501 5.1.7 Bad sender address syntax")
 				continue
 			}
-			s.handleMailFrom(m[1])
+			var size *int
+			if len(m) == 3 && len(m[2]) > 0 {
+				if sizeMatch := mailSizeRE.FindStringSubmatch(m[2]); sizeMatch != nil {
+					parsedSize, err := strconv.Atoi(sizeMatch[1])
+					if err != nil {
+						s.sendlinef("501 5.5.4 Syntax error in parameters or arguments (invalid SIZE parameter)")
+						continue
+					}
+					size = &parsedSize
+				}
+			}
+			s.handleMailFrom(m[1], size)
 		case "RCPT":
 			s.handleRcpt(line)
 		case "DATA":
 			s.handleData()
 		default:
-			log.Printf("Client: %q, verhb: %q", line, line.Verb())
 			s.sendlinef("502 5.5.2 Error: command not recognized")
 		}
 	}
@@ -254,8 +288,14 @@ func (s *session) handleHello(greeting, host string) {
 	if s.srv.PlainAuth {
 		extensions = append(extensions, "250-AUTH PLAIN")
 	}
-	extensions = append(extensions, "250-PIPELINING",
-		"250-SIZE 10240000",
+	if s.srv.TLSConfig != nil {
+		extensions = append(extensions, "250-STARTTLS")
+	}
+	if s.srv.MaxSize != 0 {
+		extensions = append(extensions, fmt.Sprintf("250-SIZE %d", s.srv.MaxSize))
+	}
+	extensions = append(extensions,
+		"250-PIPELINING",
 		"250-ENHANCEDSTATUSCODES",
 		"250-8BITMIME",
 		"250 DSN")
@@ -265,7 +305,21 @@ func (s *session) handleHello(greeting, host string) {
 	s.bw.Flush()
 }
 
-func (s *session) handleMailFrom(email string) {
+func (s *session) handleStartTLS() error {
+	s.sendlinef("220 Ready to start TLS")
+	tlsConn := tls.Server(s.rwc, s.srv.TLSConfig)
+	err := tlsConn.Handshake()
+	if err != nil {
+		s.sendSMTPErrorOrLinef(err, "403 4.7.0 TLS handshake failed")
+		return err
+	}
+	s.rwc = net.Conn(tlsConn)
+	s.bw.Reset(s.rwc)
+	s.br.Reset(s.rwc)
+	return nil
+}
+
+func (s *session) handleMailFrom(email string, size *int) {
 	// TODO: 4.1.1.11.  If the server SMTP does not recognize or
 	// cannot implement one or more of the parameters associated
 	// qwith a particular MAIL FROM or RCPT TO command, it will return
@@ -277,14 +331,12 @@ func (s *session) handleMailFrom(email string) {
 	}
 	cb := s.srv.OnNewMail
 	if cb == nil {
-		log.Printf("smtp: Server.OnNewMail is nil; rejecting MAIL FROM")
-		s.sendf("451 Server.OnNewMail not configured\r\n")
-		return
+		panic("smtpd: Server.OnNewMail is nil")
 	}
 	s.env = nil
-	env, err := cb(s, addrString(email))
+	env, err := cb(s, addrString(email), size)
 	if err != nil {
-		log.Printf("rejecting MAIL FROM %q: %v", email, err)
+		s.srv.log("Rejecting MAIL FROM %q: %v", email, err)
 		s.sendf("451 denied\r\n")
 
 		s.bw.Flush()
@@ -309,7 +361,7 @@ func (s *session) handleRcpt(line cmdLine) {
 	arg := line.Arg() // "To:<foo@bar.com>"
 	m := rcptToRE.FindStringSubmatch(arg)
 	if m == nil {
-		log.Printf("bad RCPT address: %q", arg)
+		s.srv.log("Bad RCPT address: %q", arg)
 		s.sendlinef("501 5.1.7 Bad sender address syntax")
 		return
 	}
@@ -327,7 +379,7 @@ func (s *session) handleData() {
 		return
 	}
 	if err := s.env.BeginData(); err != nil {
-		s.handleError(err)
+		s.handleError("BeginData", err)
 		return
 	}
 	s.sendlinef("354 Go ahead")
@@ -350,19 +402,19 @@ func (s *session) handleData() {
 		}
 	}
 	if err := s.env.Close(); err != nil {
-		s.handleError(err)
+		s.handleError("Close", err)
 		return
 	}
 	s.sendlinef("250 2.0.0 Ok: queued")
 	s.env = nil
 }
 
-func (s *session) handleError(err error) {
+func (s *session) handleError(method string, err error) {
 	if se, ok := err.(SMTPError); ok {
 		s.sendlinef("%s", se)
 		return
 	}
-	log.Printf("Error: %s", err)
+	s.srv.log("Method %s returns error: %v", method, err)
 	s.env = nil
 }
 
